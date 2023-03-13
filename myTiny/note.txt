@@ -1,0 +1,115 @@
+main:
+	设置日志模式
+	处理SIGPIPE信号，防止由于客户端终止，导致服务器被SIGPIPE信号终止 add_sig()
+	数据库连接池init
+	创建线程池<http_conn>
+	初始化数据库读取表
+
+
+线程同步机制封装类locker:
+	lock.h:
+		初始化互斥锁pthread_mutex_t m_mutex;
+		初始化信号量sem_t m_sem;
+		初始化条件变量pthread_cont_t m_cond;
+
+半同步半反应堆线程池Proactor事件处理模式：
+	主线程为异步线程，负责监听文件描述符，接受socket新连接，若监听的socket发生了读写事件，则将任务插入到任务队列中；
+	工作线程从工作队列中取出任务，完成读写数据的处理。
+	threadpool.h:
+		threadpool();构造函数创建线程池
+		append();通过list容器创建工作队列，向里添加工作时使用互斥锁保证线程安全，通过信号量来提醒有任务处理
+		worker();内部访问私有成员函数run()，完成线程处理要求
+		run();工作线程从工作队列中取出某个任务进行处理 
+
+HTTP连接：
+	复习epoll_create(int size);
+		epoll_ctl(int epfd, int op, int fd, struct epoll_event *event);
+		struct epoll_event{
+			__unit32_t events;  
+			epoll_data_t data;
+		};
+		epoll_wait(int epfd, struct epoll_event *event, int maxevents, int timeout);
+		int stat(const char *pathname, struct stat *statbuf);获取文件属性，存储在statbuf中
+		struct stat{
+			mode_t st_mode; 文件类型和权限
+			oof_t  st_size; 文件大小 字节数
+		};
+		void* mmap(void* start, size_t length, int port, int flags, ing fd, off_t offset);用于将一个文件或其他对象映射到内存中
+		int munmap(void* start, size_t length);解除映射
+		struct iovec{  定义了一个向量元素，通常，这个结构用于制作一个做元素数组，一般为两个元素
+			void   *iov_base;  起始缓冲区的地址
+			size_t iov_len;    缓冲区大小 字节数
+		};
+		ssize_t writev(int filedes, const struct iovec *iov, int iovcnt);用于在一次函数中写多个非连续缓冲区，也成为聚集写
+		HTTP请求报文： GET          POST
+		           请求行有URL     请求行没有URL
+				   请求数据为空    有请求数据
+		有限状态机：能够把有限个变量描述的状态变化过程以可构造验证的方式呈现出来
+	http_conn.h/http_conn.cpp:
+		封装http_conn类：
+			METHOD：报文的请求方法
+			HTTP_CODE：表示HTTP请求的处理结果
+			CHECK_STATE：主状态机状态
+				CHECK_STATE_REQUESTLINE 解析请求行
+				CHECK_STATE_HEADER      解析请求头部
+				CHECK_STATE_CONTENT     解析消息体(请求数据)，仅用于POST
+			LINE_STATUS：从状态机状态
+				LINE_OK   完整读取一行
+				LINE_BAD  报文语法有误
+				LINE_OPEN 读取行不完整
+
+			epoll相关:
+				(1)setnonblockint();非阻塞模式
+				(2)addfd();内核事件表注册
+				(3)removefd();删除事件
+				(4)modfd();重置EPOLLONESHOT
+			服务器接受http请求：
+				各子进程process()处理任务
+				调用process_read/process_write完成报文解析和报文响应
+				(1)process_read通过循环将主状态机封装，报文对每一行进行处理
+				(2)根据do_requset返回的HTTP_CODE，子线程调用process_write写入响应报文
+				(3)通过调用各类添加函数(其内部都是调用add_response函数来更新)
+				(4)完成响应报文，随后注册epollout事件，服务器主线程检查写事件，并调用http:conn::write将响应发送给浏览器
+
+定时器处理非连接活动，设置一个双向升序链表来组成定时器容器：
+	复习struct sigaction{
+			void (*sa_handler)(int);
+			void (*sa_sigaction)(int, siginfo_t *, void*);
+			sigset_t sa_mask;
+			int sa_flags;
+			void (*sa_restorer)(void);
+	    };
+		int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact);
+		int sigfillset(singset_t *set);将参数set信号集初始化，把所有信号加入信号集
+		SIGALRM 由alarm系统调用产生的timer时钟信号
+		SIGTERM 由终端发送的终止信号
+		unsigned int alarm(unsigned int seconds);设置信号传送闹钟，经过seconds秒后发送SIGALRM信号，如果未设置信号函数，则alarm默认终止进程
+		int sockerpair(int domain, int type, int protocol, int sv[2]);创建一对套接字进行通信，项目中使用管道通信
+	main.c:
+		设置一个信号处理函数sig_handler(int sig);仅向管道中发送信号值，不处理逻辑，减少异步执行时间
+		设置一个信号函数，仅关注SIGALRM和SIGTERM两个信号
+		信号通知逻辑：
+			(1)创建管道，其中写端写入信号值，读端通过IO服用系统检测读事件(设置写段非阻塞)
+			(2)设置信号处理函数
+			(3)利用IO复用系统监听读端的可读时间
+			(4)信息值给主循环，主循环根据信号值执行相应的逻辑代码
+	lst_timer.h:
+		将连接资源、定时时间和超时事件封装为定时器类
+		ultl_timer定时器类
+		sort_timer_lst定时器容器类，本质是一个双向升序排列链表
+		tick()定时任务处理函数，目的是找到未到期的定时器，判断是否超时再进行删除
+	
+单例模式创建日志系统：
+	复习单例模式：保证一个类仅有一个实例化，并提供一个访问它的全局访问点，私有化类构造函数，使用类的私有静态指针变量指向类的唯一实例，并用一个共有静态方法获取该实例
+			懒汉：不用不去初始化
+			饿汉：程序运行立刻初始化
+		int fputs(const char *str, FILE *stream);
+		可变参数宏__VA_ARGS__，，定义时宏定义中参数列表的最后一个参数为省略号，有时会加上##
+			#define my_print2(format, ...) printf(format, ##__VA_ARGS__)
+		int fflush(FILR *stream);强迫将缓冲区内的数据写回参数stream指定的文件中
+		生产者消费者模型：互斥关系，两者对缓冲区访问互斥，同时又是一个相互协作与同步的关系
+	block_queue.h：
+		push()
+		pop()
+	log.h/log.c:
+		
